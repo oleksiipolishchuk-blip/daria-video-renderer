@@ -51,8 +51,8 @@ def build_ass(transcript, text_color, font, font_size, bold) -> str:
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        "PlayResX: 1080\n"
-        "PlayResY: 1920\n"
+        "PlayResX: 720\n"
+        "PlayResY: 1280\n"
         "WrapStyle: 0\n"
         "ScaledBorderAndShadow: yes\n\n"
         "[V4+ Styles]\n"
@@ -108,8 +108,9 @@ async def render_video(
 
         cmd = [
             "ffmpeg", "-y",
+            "-threads", "1",
             "-f", "lavfi",
-            "-i", f"color=c={bg}:size=1080x1920:rate=30",
+            "-i", f"color=c={bg}:size=720x1280:rate=30",
             "-i", audio_path,
             "-vf", f"ass={ass_path}",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
