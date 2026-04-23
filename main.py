@@ -121,8 +121,9 @@ async def render_video(
 
         if result.returncode != 0:
             stderr_lines = result.stderr.strip().split('\n')
-            last_lines = '\n'.join(stderr_lines[-15:])
-            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{last_lines}")
+            error_lines = [l for l in stderr_lines if any(k in l.lower() for k in ['error', 'invalid', 'no such', 'failed', 'cannot', 'permission denied', 'unable'])]
+            summary = '\n'.join(error_lines) if error_lines else '\n'.join(stderr_lines[-30:])
+            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{summary}")
 
         with open(output_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
