@@ -120,7 +120,9 @@ async def render_video(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
         if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{result.stderr[-1000:]}")
+            stderr_lines = result.stderr.strip().split('\n')
+            last_lines = '\n'.join(stderr_lines[-15:])
+            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{last_lines}")
 
         with open(output_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
