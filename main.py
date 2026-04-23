@@ -1,0 +1,124 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+import base64
+import subprocess
+import tempfile
+import os
+
+app = FastAPI()
+
+BG_COLOR_DEFAULT    = os.getenv("BG_COLOR",    "#000000")
+TEXT_COLOR_DEFAULT  = os.getenv("TEXT_COLOR",  "#FFFFFF")
+FONT_DEFAULT        = os.getenv("FONT",        "Montserrat")
+FONT_SIZE_DEFAULT   = int(os.getenv("FONT_SIZE", "80"))
+BOLD_DEFAULT        = int(os.getenv("BOLD",    "1"))
+
+
+class TranscriptItem(BaseModel):
+    text: str
+    start: float
+    end: float
+
+
+class RenderRequest(BaseModel):
+    transcript: List[TranscriptItem]
+    audio_base64: str
+    chat_id: Optional[str] = None
+    bg_color:   str = BG_COLOR_DEFAULT
+    text_color: str = TEXT_COLOR_DEFAULT
+    font:       str = FONT_DEFAULT
+    font_size:  int = FONT_SIZE_DEFAULT
+    bold:       int = BOLD_DEFAULT
+
+
+def hex_to_ass(hex_color: str) -> str:
+    """Convert #RRGGBB to ASS color &H00BBGGRR"""
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    r, g, b = h[0:2], h[2:4], h[4:6]
+    return f"&H00{b}{g}{r}".upper()
+
+
+def to_ass_time(sec: float) -> str:
+    h  = int(sec // 3600)
+    m  = int((sec % 3600) // 60)
+    s  = sec % 60
+    cs = min(int(round((s % 1) * 100)), 99)
+    return f"{h}:{m:02d}:{int(s):02d}.{cs:02d}"
+
+
+def build_ass(transcript, text_color, font, font_size, bold) -> str:
+    primary = hex_to_ass(text_color)
+    outline  = hex_to_ass("#000000")
+
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "PlayResX: 1080\n"
+        "PlayResY: 1920\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{font},{font_size},{primary},&H000000FF,"
+        f"{outline},&H00000000,{bold},0,0,0,100,100,0,0,1,4,0,5,80,80,200,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    lines = ""
+    for item in transcript:
+        start = to_ass_time(item.start)
+        end   = to_ass_time(item.end)
+        text  = item.text.strip().replace("\n", "\\N")
+        lines += f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+
+    return header + lines
+
+
+@app.post("/render")
+async def render_video(req: RenderRequest):
+    with tempfile.TemporaryDirectory() as tmp:
+        audio_path  = os.path.join(tmp, "audio.mpga")
+        ass_path    = os.path.join(tmp, "subs.ass")
+        output_path = os.path.join(tmp, "output.mp4")
+
+        with open(audio_path, "wb") as f:
+            f.write(base64.b64decode(req.audio_base64))
+
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(build_ass(req.transcript, req.text_color, req.font, req.font_size, req.bold))
+
+        bg = req.bg_color if req.bg_color.startswith("#") else f"#{req.bg_color}"
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi",
+            "-i", f"color=c={bg}:size=1080x1920:rate=30",
+            "-i", audio_path,
+            "-vf", f"ass={ass_path}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            output_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{result.stderr[-800:]}")
+
+        with open(output_path, "rb") as f:
+            video_b64 = base64.b64encode(f.read()).decode()
+
+    return {"video_base64": video_b64, "chatId": req.chat_id}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
