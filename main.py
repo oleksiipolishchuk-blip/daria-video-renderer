@@ -1,4 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from typing import Optional
 import base64
 import subprocess
@@ -11,8 +13,18 @@ app = FastAPI()
 BG_COLOR_DEFAULT   = os.getenv("BG_COLOR",    "#000000")
 TEXT_COLOR_DEFAULT = os.getenv("TEXT_COLOR",  "#FFFFFF")
 FONT_DEFAULT       = os.getenv("FONT",        "Montserrat")
-FONT_SIZE_DEFAULT  = int(os.getenv("FONT_SIZE", "80"))
-BOLD_DEFAULT       = int(os.getenv("BOLD",    "1"))
+FONT_SIZE_DEFAULT  = os.getenv("FONT_SIZE",   "80")
+BOLD_DEFAULT       = os.getenv("BOLD",        "1")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": str(exc.errors())})
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {str(exc)}"})
 
 
 def hex_to_ass(hex_color: str) -> str:
@@ -65,15 +77,18 @@ def build_ass(transcript, text_color, font, font_size, bold) -> str:
 
 @app.post("/render")
 async def render_video(
-    audio:      UploadFile      = File(...),
-    transcript: str             = Form(...),
-    chat_id:    Optional[str]   = Form(None),
-    bg_color:   str             = Form(BG_COLOR_DEFAULT),
-    text_color: str             = Form(TEXT_COLOR_DEFAULT),
-    font:       str             = Form(FONT_DEFAULT),
-    font_size:  int             = Form(FONT_SIZE_DEFAULT),
-    bold:       int             = Form(BOLD_DEFAULT),
+    audio:      UploadFile    = File(...),
+    transcript: str           = Form(...),
+    chat_id:    Optional[str] = Form(None),
+    bg_color:   str           = Form(BG_COLOR_DEFAULT),
+    text_color: str           = Form(TEXT_COLOR_DEFAULT),
+    font:       str           = Form(FONT_DEFAULT),
+    font_size:  str           = Form(FONT_SIZE_DEFAULT),
+    bold:       str           = Form(BOLD_DEFAULT),
 ):
+    font_size_int = int(font_size)
+    bold_int      = int(bold)
+
     transcript_data = json.loads(transcript)
     audio_data = await audio.read()
 
@@ -86,7 +101,7 @@ async def render_video(
             f.write(audio_data)
 
         with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(build_ass(transcript_data, text_color, font, font_size, bold))
+            f.write(build_ass(transcript_data, text_color, font, font_size_int, bold_int))
 
         bg = bg_color if bg_color.startswith("#") else f"#{bg_color}"
 
@@ -105,7 +120,7 @@ async def render_video(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
         if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{result.stderr[-800:]}")
+            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{result.stderr[-1000:]}")
 
         with open(output_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
