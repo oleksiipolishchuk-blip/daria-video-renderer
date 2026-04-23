@@ -1,39 +1,21 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from typing import Optional
 import base64
 import subprocess
 import tempfile
 import os
+import json
 
 app = FastAPI()
 
-BG_COLOR_DEFAULT    = os.getenv("BG_COLOR",    "#000000")
-TEXT_COLOR_DEFAULT  = os.getenv("TEXT_COLOR",  "#FFFFFF")
-FONT_DEFAULT        = os.getenv("FONT",        "Montserrat")
-FONT_SIZE_DEFAULT   = int(os.getenv("FONT_SIZE", "80"))
-BOLD_DEFAULT        = int(os.getenv("BOLD",    "1"))
-
-
-class TranscriptItem(BaseModel):
-    text: str
-    start: float
-    end: float
-
-
-class RenderRequest(BaseModel):
-    transcript: List[TranscriptItem]
-    audio_base64: str
-    chat_id: Optional[str] = None
-    bg_color:   str = BG_COLOR_DEFAULT
-    text_color: str = TEXT_COLOR_DEFAULT
-    font:       str = FONT_DEFAULT
-    font_size:  int = FONT_SIZE_DEFAULT
-    bold:       int = BOLD_DEFAULT
+BG_COLOR_DEFAULT   = os.getenv("BG_COLOR",    "#000000")
+TEXT_COLOR_DEFAULT = os.getenv("TEXT_COLOR",  "#FFFFFF")
+FONT_DEFAULT       = os.getenv("FONT",        "Montserrat")
+FONT_SIZE_DEFAULT  = int(os.getenv("FONT_SIZE", "80"))
+BOLD_DEFAULT       = int(os.getenv("BOLD",    "1"))
 
 
 def hex_to_ass(hex_color: str) -> str:
-    """Convert #RRGGBB to ASS color &H00BBGGRR"""
     h = hex_color.lstrip("#")
     if len(h) == 3:
         h = "".join(c * 2 for c in h)
@@ -73,28 +55,40 @@ def build_ass(transcript, text_color, font, font_size, bold) -> str:
 
     lines = ""
     for item in transcript:
-        start = to_ass_time(item.start)
-        end   = to_ass_time(item.end)
-        text  = item.text.strip().replace("\n", "\\N")
+        start = to_ass_time(item["start"])
+        end   = to_ass_time(item["end"])
+        text  = item["text"].strip().replace("\n", "\\N")
         lines += f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
 
     return header + lines
 
 
 @app.post("/render")
-async def render_video(req: RenderRequest):
+async def render_video(
+    audio:      UploadFile      = File(...),
+    transcript: str             = Form(...),
+    chat_id:    Optional[str]   = Form(None),
+    bg_color:   str             = Form(BG_COLOR_DEFAULT),
+    text_color: str             = Form(TEXT_COLOR_DEFAULT),
+    font:       str             = Form(FONT_DEFAULT),
+    font_size:  int             = Form(FONT_SIZE_DEFAULT),
+    bold:       int             = Form(BOLD_DEFAULT),
+):
+    transcript_data = json.loads(transcript)
+    audio_data = await audio.read()
+
     with tempfile.TemporaryDirectory() as tmp:
         audio_path  = os.path.join(tmp, "audio.mpga")
         ass_path    = os.path.join(tmp, "subs.ass")
         output_path = os.path.join(tmp, "output.mp4")
 
         with open(audio_path, "wb") as f:
-            f.write(base64.b64decode(req.audio_base64))
+            f.write(audio_data)
 
         with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(build_ass(req.transcript, req.text_color, req.font, req.font_size, req.bold))
+            f.write(build_ass(transcript_data, text_color, font, font_size, bold))
 
-        bg = req.bg_color if req.bg_color.startswith("#") else f"#{req.bg_color}"
+        bg = bg_color if bg_color.startswith("#") else f"#{bg_color}"
 
         cmd = [
             "ffmpeg", "-y",
@@ -116,7 +110,7 @@ async def render_video(req: RenderRequest):
         with open(output_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
 
-    return {"video_base64": video_b64, "chatId": req.chat_id}
+    return {"video_base64": video_b64, "chatId": chat_id}
 
 
 @app.get("/health")
