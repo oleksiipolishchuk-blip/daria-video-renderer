@@ -113,7 +113,6 @@ async def render_video(
             "-i", audio_path,
             "-vf", f"ass={ass_path}",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-x264opts", "threads=1:lookaheadthreads=1",
             "-c:a", "aac", "-b:a", "128k",
             "-shortest",
             output_path,
