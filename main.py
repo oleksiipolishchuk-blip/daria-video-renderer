@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import os
 import json
+import sys
 
 app = FastAPI()
 
@@ -111,19 +112,20 @@ async def render_video(
             "-i", f"color=c={bg}:size=1080x1920:rate=30",
             "-i", audio_path,
             "-vf", f"ass={ass_path}",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-x264opts", "threads=1:lookaheadthreads=1",
             "-c:a", "aac", "-b:a", "128k",
             "-shortest",
             output_path,
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
         if result.returncode != 0:
-            stderr_lines = result.stderr.strip().split('\n')
-            error_lines = [l for l in stderr_lines if any(k in l.lower() for k in ['error', 'invalid', 'no such', 'failed', 'cannot', 'permission denied', 'unable'])]
-            summary = '\n'.join(error_lines) if error_lines else '\n'.join(stderr_lines[-30:])
-            raise HTTPException(status_code=500, detail=f"FFmpeg error:\n{summary}")
+            print(f"[FFmpeg] rc={result.returncode}", file=sys.stderr, flush=True)
+            print(f"[FFmpeg stderr]\n{result.stderr}", file=sys.stderr, flush=True)
+            last = '\n'.join(result.stderr.strip().split('\n')[-50:])
+            raise HTTPException(status_code=500, detail=f"rc={result.returncode}\n{last}")
 
         with open(output_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
