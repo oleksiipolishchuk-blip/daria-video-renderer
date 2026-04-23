@@ -8,14 +8,21 @@ import tempfile
 import os
 import json
 import sys
+from pathlib import Path
+import shutil
 
 app = FastAPI()
 
-BG_COLOR_DEFAULT   = os.getenv("BG_COLOR",    "#000000")
-TEXT_COLOR_DEFAULT = os.getenv("TEXT_COLOR",  "#FFFFFF")
-FONT_DEFAULT       = os.getenv("FONT",        "Montserrat")
-FONT_SIZE_DEFAULT  = os.getenv("FONT_SIZE",   "80")
-BOLD_DEFAULT       = os.getenv("BOLD",        "1")
+VIDEO_WIDTH  = 720
+VIDEO_HEIGHT = 1280
+
+FONT_DIR = Path("/usr/share/fonts/truetype/montserrat")
+FONT_MAP = {
+    "montserrat":          FONT_DIR / "Montserrat-Bold.ttf",
+    "montserrat bold":     FONT_DIR / "Montserrat-Bold.ttf",
+    "montserrat semibold": FONT_DIR / "Montserrat-SemiBold.ttf",
+    "montserrat regular":  FONT_DIR / "Montserrat-Regular.ttf",
+}
 
 
 @app.exception_handler(RequestValidationError)
@@ -28,107 +35,202 @@ async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {str(exc)}"})
 
 
-def hex_to_ass(hex_color: str) -> str:
+def hex_to_rgb(hex_color: str) -> tuple:
     h = hex_color.lstrip("#")
     if len(h) == 3:
         h = "".join(c * 2 for c in h)
-    r, g, b = h[0:2], h[2:4], h[4:6]
-    return f"&H00{b}{g}{r}".upper()
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
-def to_ass_time(sec: float) -> str:
-    h  = int(sec // 3600)
-    m  = int((sec % 3600) // 60)
-    s  = sec % 60
-    cs = min(int(round((s % 1) * 100)), 99)
-    return f"{h}:{m:02d}:{int(s):02d}.{cs:02d}"
+def load_font(font_name: str, size: int):
+    from PIL import ImageFont
+    key = font_name.lower().strip()
+    path = FONT_MAP.get(key)
+    if path and path.exists():
+        return ImageFont.truetype(str(path), size)
+    # fallback: search any .ttf that contains the first word of font name
+    first_word = key.split()[0]
+    for d in ["/usr/share/fonts", "/usr/local/share/fonts"]:
+        for f in Path(d).rglob("*.ttf"):
+            if first_word in f.stem.lower():
+                return ImageFont.truetype(str(f), size)
+    return ImageFont.load_default()
 
 
-def build_ass(transcript, text_color, font, font_size, bold) -> str:
-    primary = hex_to_ass(text_color)
-    outline  = hex_to_ass("#000000")
+def wrap_lines(draw, text: str, font, max_width: int) -> list[str]:
+    words = text.split()
+    lines, cur = [], []
+    for word in words:
+        test = " ".join(cur + [word])
+        if draw.textbbox((0, 0), test, font=font)[2] <= max_width:
+            cur.append(word)
+        else:
+            if cur:
+                lines.append(" ".join(cur))
+            cur = [word]
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
 
-    header = (
-        "[Script Info]\n"
-        "ScriptType: v4.00+\n"
-        "PlayResX: 720\n"
-        "PlayResY: 1280\n"
-        "WrapStyle: 0\n"
-        "ScaledBorderAndShadow: yes\n\n"
-        "[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
-        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
-        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{font},{font_size},{primary},&H000000FF,"
-        f"{outline},&H00000000,{bold},0,0,0,100,100,0,0,1,4,0,5,80,80,200,1\n\n"
-        "[Events]\n"
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    )
 
-    lines = ""
-    for item in transcript:
-        start = to_ass_time(item["start"])
-        end   = to_ass_time(item["end"])
-        text  = item["text"].strip().replace("\n", "\\N")
-        lines += f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
+def fix_typography(lines: list[str]) -> list[str]:
+    # Widow fix: last line = 1 short word → pull last word from prev line
+    if len(lines) >= 2:
+        last = lines[-1]
+        if len(last.split()) == 1 and len(last.rstrip(".,!?")) <= 6:
+            prev = lines[-2].split()
+            if len(prev) > 1:
+                lines[-2] = " ".join(prev[:-1])
+                lines[-1] = prev[-1] + " " + last
 
-    return header + lines
+    # Dash fix: line starts with dash → move dash to end of prev line
+    fixed = []
+    for i, line in enumerate(lines):
+        if i > 0 and line.startswith(("—", "–", "-")):
+            parts = line.split(None, 1)
+            fixed[-1] += " " + parts[0]
+            if len(parts) > 1:
+                fixed.append(parts[1])
+        else:
+            fixed.append(line)
+    return fixed
+
+
+def render_frame(text: str, bg_rgb: tuple, text_rgb: tuple, font) -> "Image":
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), bg_rgb)
+    if not text.strip():
+        return img
+    draw = ImageDraw.Draw(img)
+
+    lines = wrap_lines(draw, text, font, int(VIDEO_WIDTH * 0.82))
+    lines = fix_typography(lines)
+
+    font_size = font.size
+    line_h = int(font_size * 1.12)
+    total_h = len(lines) * line_h
+    y = (VIDEO_HEIGHT - total_h) // 2
+
+    for line in lines:
+        w = draw.textbbox((0, 0), line, font=font)[2]
+        draw.text(((VIDEO_WIDTH - w) // 2, y), line, font=font, fill=text_rgb)
+        y += line_h
+
+    return img
 
 
 @app.post("/render")
 async def render_video(
-    audio:      UploadFile    = File(...),
-    transcript: str           = Form(...),
-    chat_id:    Optional[str] = Form(None),
-    bg_color:   str           = Form(BG_COLOR_DEFAULT),
-    text_color: str           = Form(TEXT_COLOR_DEFAULT),
-    font:       str           = Form(FONT_DEFAULT),
-    font_size:  str           = Form(FONT_SIZE_DEFAULT),
-    bold:       str           = Form(BOLD_DEFAULT),
+    audio:      UploadFile           = File(...),
+    transcript: str                  = Form(...),
+    chat_id:    Optional[str]        = Form(None),
+    bg_color:   str                  = Form("#000000"),
+    text_color: str                  = Form("#FFFFFF"),
+    font:       str                  = Form("Montserrat"),
+    font_size:  str                  = Form("80"),
+    bold:       str                  = Form("1"),
+    bg_music:   Optional[UploadFile] = File(None),
 ):
     font_size_int = int(font_size)
-    bold_int      = int(bold)
-
     transcript_data = json.loads(transcript)
     audio_data = await audio.read()
+    music_data = await bg_music.read() if bg_music else None
+
+    bg_rgb   = hex_to_rgb(bg_color   if bg_color.startswith("#")   else f"#{bg_color}")
+    text_rgb = hex_to_rgb(text_color if text_color.startswith("#") else f"#{text_color}")
+    pil_font = load_font(font, font_size_int)
 
     with tempfile.TemporaryDirectory() as tmp:
-        audio_path  = os.path.join(tmp, "audio.mpga")
-        ass_path    = os.path.join(tmp, "subs.ass")
-        output_path = os.path.join(tmp, "output.mp4")
+        tmp_path   = Path(tmp)
+        audio_path = tmp_path / "audio.mp3"
+        frames_dir = tmp_path / "frames"
+        no_music   = tmp_path / "no_music.mp4"
+        output     = tmp_path / "output.mp4"
+        frames_dir.mkdir()
 
-        with open(audio_path, "wb") as f:
-            f.write(audio_data)
+        audio_path.write_bytes(audio_data)
+        music_path = None
+        if music_data:
+            music_path = tmp_path / "music.mp3"
+            music_path.write_bytes(music_data)
 
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(build_ass(transcript_data, text_color, font, font_size_int, bold_int))
+        # Audio duration
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+                capture_output=True, text=True
+            )
+            audio_duration = float(probe.stdout.strip())
+        except Exception:
+            audio_duration = transcript_data[-1]["end"] if transcript_data else 0
 
-        bg = bg_color if bg_color.startswith("#") else f"#{bg_color}"
+        # Generate PNG frames (one per subtitle block)
+        frame_paths = {}
+        for idx, block in enumerate(transcript_data):
+            fp = frames_dir / f"frame_{idx:04d}.png"
+            render_frame(block["text"], bg_rgb, text_rgb, pil_font).save(str(fp), "PNG")
+            frame_paths[idx] = fp
 
-        cmd = [
+        # Build concat list — each block holds until next block starts (no black screen)
+        concat_lines = []
+        for idx, block in enumerate(transcript_data):
+            dur = round(
+                (transcript_data[idx + 1]["start"] if idx + 1 < len(transcript_data) else audio_duration)
+                - block["start"], 3
+            )
+            if dur <= 0:
+                continue
+            concat_lines += [f"file '{frame_paths[idx]}'", f"duration {dur}"]
+        if concat_lines:
+            concat_lines.append(concat_lines[-2])  # repeat last (ffmpeg concat requirement)
+
+        concat_file = tmp_path / "concat.txt"
+        concat_file.write_text("\n".join(concat_lines))
+
+        # Step 1: render frames + audio (Premiere-compatible settings)
+        cmd1 = [
             "ffmpeg", "-y",
-            "-threads", "1",
-            "-f", "lavfi",
-            "-i", f"color=c={bg}:size=720x1280:rate=30",
-            "-i", audio_path,
-            "-vf", f"ass={ass_path}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-            "-c:a", "aac", "-b:a", "128k",
+            "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-i", str(audio_path),
+            "-vsync", "cfr", "-r", "30",
+            "-c:v", "libx264", "-preset", "fast",
+            "-profile:v", "high", "-level", "4.0",
+            "-crf", "23",
+            "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-shortest",
-            output_path,
+            str(no_music),
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        r1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=300)
+        if r1.returncode != 0:
+            print(f"[FFmpeg] rc={r1.returncode}\n{r1.stderr}", file=sys.stderr, flush=True)
+            raise HTTPException(status_code=500,
+                detail=f"rc={r1.returncode}\n{r1.stderr.strip()[-2000:]}")
 
-        if result.returncode != 0:
-            print(f"[FFmpeg] rc={result.returncode}", file=sys.stderr, flush=True)
-            print(f"[FFmpeg stderr]\n{result.stderr}", file=sys.stderr, flush=True)
-            last = '\n'.join(result.stderr.strip().split('\n')[-50:])
-            raise HTTPException(status_code=500, detail=f"rc={result.returncode}\n{last}")
+        # Step 2: mix background music (optional)
+        if music_path:
+            cmd2 = [
+                "ffmpeg", "-y",
+                "-i", str(no_music),
+                "-stream_loop", "-1", "-i", str(music_path),
+                "-filter_complex",
+                "[1:a]volume=0.1[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                "-shortest", str(output),
+            ]
+            r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=300)
+            if r2.returncode != 0:
+                print(f"[FFmpeg music] rc={r2.returncode}\n{r2.stderr}", file=sys.stderr, flush=True)
+                shutil.copy(str(no_music), str(output))  # fallback: no music
+        else:
+            shutil.copy(str(no_music), str(output))
 
-        with open(output_path, "rb") as f:
-            video_b64 = base64.b64encode(f.read()).decode()
+        video_b64 = base64.b64encode(output.read_bytes()).decode()
 
     return {"video_base64": video_b64, "chatId": chat_id}
 
