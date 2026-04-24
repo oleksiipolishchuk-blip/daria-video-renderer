@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from typing import Optional
 import base64
 import subprocess
@@ -244,9 +244,13 @@ async def render_video(
         else:
             shutil.copy(str(no_music), str(output))
 
-        video_b64 = base64.b64encode(output.read_bytes()).decode()
+        video_bytes = output.read_bytes()
 
-    return {"video_base64": video_b64, "chatId": chat_id}
+    return Response(
+        content=video_bytes,
+        media_type="video/mp4",
+        headers={"X-Chat-Id": chat_id or ""},
+    )
 
 
 @app.get("/health")
