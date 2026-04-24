@@ -104,6 +104,49 @@ def fix_typography(lines: list[str]) -> list[str]:
     return fixed
 
 
+def split_long_blocks(transcript_data: list, font_name: str) -> list:
+    """Split blocks that still exceed MAX_LINES at minimum font size."""
+    from PIL import Image, ImageDraw
+    MAX_LINES = 4
+    MIN_SIZE  = 36
+    max_width = int(VIDEO_WIDTH * 0.82)
+    draw = ImageDraw.Draw(Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT)))
+    font = load_font(font_name, MIN_SIZE)
+
+    result = []
+    for block in transcript_data:
+        text = block["text"]
+        if len(wrap_lines(draw, text, font, max_width)) <= MAX_LINES:
+            result.append(block)
+            continue
+        # Split word-by-word into chunks that fit MAX_LINES
+        words = text.split()
+        chunks, cur = [], []
+        for word in words:
+            test = " ".join(cur + [word])
+            if len(wrap_lines(draw, test, font, max_width)) <= MAX_LINES:
+                cur.append(word)
+            else:
+                if cur:
+                    chunks.append(" ".join(cur))
+                cur = [word]
+        if cur:
+            chunks.append(" ".join(cur))
+        if len(chunks) <= 1:
+            result.append(block)
+            continue
+        # Distribute time evenly across sub-blocks
+        total_dur = block["end"] - block["start"]
+        chunk_dur = total_dur / len(chunks)
+        for i, chunk_text in enumerate(chunks):
+            result.append({
+                "text": chunk_text,
+                "start": round(block["start"] + i * chunk_dur, 3),
+                "end":   round(block["start"] + (i + 1) * chunk_dur, 3),
+            })
+    return result
+
+
 def fit_font_size(texts: list, font_name: str, initial_size: int) -> int:
     """Find the largest font size where every text block fits within MAX_LINES."""
     from PIL import Image, ImageDraw
@@ -160,6 +203,7 @@ async def render_video(
 ):
     font_size_int = int(font_size)
     transcript_data = json.loads(transcript)
+    transcript_data = split_long_blocks(transcript_data, font)
     audio_data = await audio.read()
     music_data = await bg_music.read() if bg_music else None
 
