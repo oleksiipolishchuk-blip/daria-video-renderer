@@ -236,7 +236,7 @@ async def render_video(
             str(no_music),
         ]
 
-        r1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=300)
+        r1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=600)
         if r1.returncode != 0:
             print(f"[FFmpeg] rc={r1.returncode}\n{r1.stderr}", file=sys.stderr, flush=True)
             raise HTTPException(status_code=500,
@@ -254,7 +254,7 @@ async def render_video(
                 "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
                 "-shortest", str(output),
             ]
-            r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=300)
+            r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
             if r2.returncode != 0:
                 print(f"[FFmpeg music] rc={r2.returncode}\n{r2.stderr}", file=sys.stderr, flush=True)
                 shutil.copy(str(no_music), str(output))  # fallback: no music
