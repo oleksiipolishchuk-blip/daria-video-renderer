@@ -97,23 +97,37 @@ def fix_typography(lines: list[str]) -> list[str]:
 
 
 def render_frame(text: str, bg_rgb: tuple, text_rgb: tuple, font) -> "Image":
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
     img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), bg_rgb)
     if not text.strip():
         return img
     draw = ImageDraw.Draw(img)
 
-    lines = wrap_lines(draw, text, font, int(VIDEO_WIDTH * 0.82))
+    max_width = int(VIDEO_WIDTH * 0.82)
+    lines = wrap_lines(draw, text, font, max_width)
     lines = fix_typography(lines)
 
-    font_size = font.size
-    line_h = int(font_size * 1.12)
+    # Auto-scale: shrink font until text fits in MAX_LINES lines
+    MAX_LINES = 4
+    MIN_SIZE  = 36
+    current_font = font
+    while len(lines) > MAX_LINES and current_font.size > MIN_SIZE:
+        new_size = max(current_font.size - 4, MIN_SIZE)
+        try:
+            current_font = ImageFont.truetype(current_font.path, new_size)
+        except Exception:
+            break
+        lines = wrap_lines(draw, text, current_font, max_width)
+        lines = fix_typography(lines)
+
+    font_size = current_font.size
+    line_h = int(font_size * 1.18)
     total_h = len(lines) * line_h
     y = (VIDEO_HEIGHT - total_h) // 2
 
     for line in lines:
-        w = draw.textbbox((0, 0), line, font=font)[2]
-        draw.text(((VIDEO_WIDTH - w) // 2, y), line, font=font, fill=text_rgb)
+        w = draw.textbbox((0, 0), line, font=current_font)[2]
+        draw.text(((VIDEO_WIDTH - w) // 2, y), line, font=current_font, fill=text_rgb)
         y += line_h
 
     return img
