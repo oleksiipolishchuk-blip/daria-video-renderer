@@ -249,7 +249,10 @@ async def render_video(
     return Response(
         content=video_bytes,
         media_type="video/mp4",
-        headers={"X-Chat-Id": chat_id or ""},
+        headers={
+            "X-Chat-Id": chat_id or "",
+            "Content-Disposition": 'attachment; filename="video.mp4"',
+        },
     )
 
 
