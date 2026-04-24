@@ -96,38 +96,43 @@ def fix_typography(lines: list[str]) -> list[str]:
     return fixed
 
 
+def fit_font_size(texts: list, font_name: str, initial_size: int) -> int:
+    """Find the largest font size where every text block fits within MAX_LINES."""
+    from PIL import Image, ImageDraw
+    draw = ImageDraw.Draw(Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT)))
+    max_width = int(VIDEO_WIDTH * 0.82)
+    MAX_LINES = 4
+    MIN_SIZE  = 36
+    size = initial_size
+    for text in texts:
+        if not text.strip():
+            continue
+        font = load_font(font_name, size)
+        lines = wrap_lines(draw, text, font, max_width)
+        while len(lines) > MAX_LINES and size > MIN_SIZE:
+            size = max(size - 4, MIN_SIZE)
+            font = load_font(font_name, size)
+            lines = wrap_lines(draw, text, font, max_width)
+    return size
+
+
 def render_frame(text: str, bg_rgb: tuple, text_rgb: tuple, font) -> "Image":
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
     img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), bg_rgb)
     if not text.strip():
         return img
     draw = ImageDraw.Draw(img)
 
-    max_width = int(VIDEO_WIDTH * 0.82)
-    lines = wrap_lines(draw, text, font, max_width)
+    lines = wrap_lines(draw, text, font, int(VIDEO_WIDTH * 0.82))
     lines = fix_typography(lines)
 
-    # Auto-scale: shrink font until text fits in MAX_LINES lines
-    MAX_LINES = 4
-    MIN_SIZE  = 36
-    current_font = font
-    while len(lines) > MAX_LINES and current_font.size > MIN_SIZE:
-        new_size = max(current_font.size - 4, MIN_SIZE)
-        try:
-            current_font = ImageFont.truetype(current_font.path, new_size)
-        except Exception:
-            break
-        lines = wrap_lines(draw, text, current_font, max_width)
-        lines = fix_typography(lines)
-
-    font_size = current_font.size
-    line_h = int(font_size * 1.18)
+    line_h = int(font.size * 1.18)
     total_h = len(lines) * line_h
     y = (VIDEO_HEIGHT - total_h) // 2
 
     for line in lines:
-        w = draw.textbbox((0, 0), line, font=current_font)[2]
-        draw.text(((VIDEO_WIDTH - w) // 2, y), line, font=current_font, fill=text_rgb)
+        w = draw.textbbox((0, 0), line, font=font)[2]
+        draw.text(((VIDEO_WIDTH - w) // 2, y), line, font=font, fill=text_rgb)
         y += line_h
 
     return img
@@ -152,7 +157,11 @@ async def render_video(
 
     bg_rgb   = hex_to_rgb(bg_color   if bg_color.startswith("#")   else f"#{bg_color}")
     text_rgb = hex_to_rgb(text_color if text_color.startswith("#") else f"#{text_color}")
-    pil_font = load_font(font, font_size_int)
+
+    # Find one consistent font size for all blocks
+    all_texts = [b["text"] for b in transcript_data]
+    global_size = fit_font_size(all_texts, font, font_size_int)
+    pil_font = load_font(font, global_size)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path   = Path(tmp)
