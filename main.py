@@ -249,7 +249,7 @@ async def render_video(
                 "-i", str(no_music),
                 "-stream_loop", "-1", "-i", str(music_path),
                 "-filter_complex",
-                "[1:a]volume=0.25[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                "[1:a]volume=0.1[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
                 "-shortest", str(output),
