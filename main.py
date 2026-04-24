@@ -167,6 +167,111 @@ def fit_font_size(texts: list, font_name: str, initial_size: int) -> int:
     return size
 
 
+def remove_silence(audio_path: Path, tmp_path: Path) -> tuple[Path, list]:
+    """Remove silence from audio and return (new_path, silence_intervals).
+    silence_intervals: list of (start, end) in original timeline that were removed."""
+    # Detect silence: gaps > 0.4s below -38dB
+    detect = subprocess.run(
+        ["ffmpeg", "-i", str(audio_path),
+         "-af", "silencedetect=noise=-38dB:d=0.4",
+         "-f", "null", "-"],
+        capture_output=True, text=True, timeout=120
+    )
+    output = detect.stderr
+
+    # Parse silence intervals
+    intervals = []
+    starts = []
+    for line in output.splitlines():
+        if "silence_start" in line:
+            try:
+                starts.append(float(line.split("silence_start:")[1].strip()))
+            except Exception:
+                pass
+        elif "silence_end" in line and starts:
+            try:
+                parts = line.split("silence_end:")[1].strip().split("|")
+                end = float(parts[0].strip())
+                # Keep 0.15s of silence at the start of each gap (natural breath)
+                gap_start = starts.pop(0) + 0.15
+                if end - gap_start > 0.05:
+                    intervals.append((gap_start, end))
+            except Exception:
+                pass
+
+    if not intervals:
+        return audio_path, []
+
+    # Build FFmpeg atrim filter to cut out silence intervals
+    # Strategy: keep all non-silent segments, concat them
+    duration_probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+        capture_output=True, text=True
+    )
+    total_dur = float(duration_probe.stdout.strip())
+
+    # Build segments to keep
+    keep = []
+    prev = 0.0
+    for (s, e) in intervals:
+        if s > prev:
+            keep.append((prev, s))
+        prev = e
+    if prev < total_dur:
+        keep.append((prev, total_dur))
+
+    if not keep:
+        return audio_path, intervals
+
+    # Build filter_complex with atrim + concat
+    filter_parts = []
+    for i, (s, e) in enumerate(keep):
+        filter_parts.append(f"[0:a]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS[seg{i}]")
+    concat_inputs = "".join(f"[seg{i}]" for i in range(len(keep)))
+    filter_parts.append(f"{concat_inputs}concat=n={len(keep)}:v=0:a=1[aout]")
+
+    clean_path = tmp_path / "audio_clean.mp3"
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(audio_path),
+         "-filter_complex", ";".join(filter_parts),
+         "-map", "[aout]", "-c:a", "libmp3lame", "-q:a", "2",
+         str(clean_path)],
+        capture_output=True, text=True, timeout=120
+    )
+    if r.returncode != 0:
+        print(f"[silence remove] failed: {r.stderr[-500:]}", file=sys.stderr)
+        return audio_path, []
+
+    return clean_path, intervals
+
+
+def adjust_timestamps(transcript_data: list, intervals: list) -> list:
+    """Shift timestamps to account for removed silence intervals."""
+    if not intervals:
+        return transcript_data
+
+    def shift(t: float) -> float:
+        offset = 0.0
+        for (s, e) in intervals:
+            if t <= s:
+                break
+            if t >= e:
+                offset += e - s
+            else:
+                offset += t - s
+        return round(t - offset, 3)
+
+    result = []
+    for block in transcript_data:
+        result.append({
+            "text":  block["text"],
+            "start": shift(block["start"]),
+            "end":   shift(block["end"]),
+        })
+    return result
+
+
 def render_frame(text: str, bg_rgb: tuple, text_rgb: tuple, font) -> "Image":
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), bg_rgb)
@@ -228,6 +333,10 @@ async def render_video(
         if music_data:
             music_path = tmp_path / "music.mp3"
             music_path.write_bytes(music_data)
+
+        # Remove silence and adjust timestamps
+        audio_path, silence_intervals = remove_silence(audio_path, tmp_path)
+        transcript_data = adjust_timestamps(transcript_data, silence_intervals)
 
         # Audio duration
         try:
