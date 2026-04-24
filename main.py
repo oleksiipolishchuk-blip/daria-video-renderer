@@ -22,6 +22,13 @@ FONT_MAP = {
     "montserrat bold":     FONT_DIR / "Montserrat-Bold.ttf",
     "montserrat semibold": FONT_DIR / "Montserrat-SemiBold.ttf",
     "montserrat regular":  FONT_DIR / "Montserrat-Regular.ttf",
+    "gilroy":              FONT_DIR / "Gilroy-Medium.ttf",
+    "gilroy medium":       FONT_DIR / "Gilroy-Medium.ttf",
+    "georgia":             FONT_DIR / "Georgia.ttf",
+    "ltcarpet":            FONT_DIR / "LTCarpet.ttf",
+    "lt carpet":           FONT_DIR / "LTCarpet.ttf",
+    "bodyhand":            FONT_DIR / "Bodyhand Regular.otf",
+    "inter":               FONT_DIR / "Inter-VariableFont_opsz,wght.ttf",
 }
 
 
@@ -48,12 +55,13 @@ def load_font(font_name: str, size: int):
     path = FONT_MAP.get(key)
     if path and path.exists():
         return ImageFont.truetype(str(path), size)
-    # fallback: search any .ttf that contains the first word of font name
+    # fallback: search any .ttf/.otf that contains the first word of font name
     first_word = key.split()[0]
     for d in ["/usr/share/fonts", "/usr/local/share/fonts"]:
-        for f in Path(d).rglob("*.ttf"):
-            if first_word in f.stem.lower():
-                return ImageFont.truetype(str(f), size)
+        for ext in ("*.ttf", "*.otf"):
+            for f in Path(d).rglob(ext):
+                if first_word in f.stem.lower():
+                    return ImageFont.truetype(str(f), size)
     return ImageFont.load_default()
 
 
