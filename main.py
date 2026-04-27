@@ -334,6 +334,17 @@ async def render_video(
             music_path = tmp_path / "music.mp3"
             music_path.write_bytes(music_data)
 
+        # Normalize audio loudness (fixes volume jumps between TTS chunks)
+        norm_path = tmp_path / "audio_norm.mp3"
+        rn = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(audio_path),
+             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+             "-c:a", "libmp3lame", "-q:a", "2", str(norm_path)],
+            capture_output=True, text=True, timeout=120
+        )
+        if rn.returncode == 0:
+            audio_path = norm_path
+
         # Remove silence and adjust timestamps
         audio_path, silence_intervals = remove_silence(audio_path, tmp_path)
         transcript_data = adjust_timestamps(transcript_data, silence_intervals)
