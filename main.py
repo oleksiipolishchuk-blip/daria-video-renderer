@@ -442,6 +442,7 @@ async def render_video(
             "-crf", "23",
             "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
             "-pix_fmt", "yuv420p",
+            "-vf", "setsar=1:1",
             "-movflags", "+faststart",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-shortest",
