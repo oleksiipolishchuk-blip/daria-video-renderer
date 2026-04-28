@@ -16,7 +16,7 @@ app = FastAPI()
 
 VIDEO_WIDTH       = 720
 VIDEO_HEIGHT      = 1280
-MAX_SUBTITLE_CHARS = 130
+MAX_SUBTITLE_CHARS = 65
 OPENAI_MODEL      = "gpt-4o"
 
 FONT_DIR = Path("/usr/share/fonts/truetype/montserrat")
@@ -278,14 +278,16 @@ def adjust_timestamps(transcript_data: list, intervals: list) -> list:
 def split_text_into_subtitle_blocks(text: str, client, max_chars: int = MAX_SUBTITLE_CHARS) -> list[str]:
     flat_text = " ".join(text.split())
 
-    prompt = f"""You are a subtitle editor. Split the following text into subtitle blocks for a video.
+    prompt = f"""You are a subtitle editor. Split the following text into subtitle blocks for a vertical video.
 
 RULES:
-1. Each block must be a complete, logical phrase - never cut mid-thought
-2. Each block must be maximum {max_chars} characters (including spaces)
-3. Prefer splitting at: sentence endings (. ? !), em dashes, or commas
-4. Do NOT change, add, or remove any words - only split
-5. Return ONLY the blocks, one per line, no numbering, no extra text
+1. Each block must be maximum {max_chars} characters (including spaces)
+2. Each block must be maximum 9 words — this is critical
+3. Never put more than 9 words in one block
+4. Prefer splitting at: sentence endings (. ? !), commas, or em dashes
+5. Each block must feel like a complete thought or natural pause
+6. Do NOT change, add, or remove any words - only split
+7. Return ONLY the blocks, one per line, no numbering, no extra text
 
 TEXT:
 {flat_text}"""
