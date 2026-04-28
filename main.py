@@ -113,7 +113,7 @@ def split_long_blocks(transcript_data: list, font_name: str) -> list:
     from PIL import Image, ImageDraw
     MAX_LINES = 4
     MIN_SIZE  = 36
-    max_width = int(VIDEO_WIDTH * 0.82)
+    max_width = int(VIDEO_WIDTH * 0.72)
     draw = ImageDraw.Draw(Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT)))
     font = load_font(font_name, MIN_SIZE)
 
@@ -155,7 +155,7 @@ def fit_font_size(texts: list, font_name: str, initial_size: int) -> int:
     """Find the largest font size where every text block fits within MAX_LINES."""
     from PIL import Image, ImageDraw
     draw = ImageDraw.Draw(Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT)))
-    max_width = int(VIDEO_WIDTH * 0.82)
+    max_width = int(VIDEO_WIDTH * 0.72)
     MAX_LINES = 4
     MIN_SIZE  = 36
     size = initial_size
@@ -388,7 +388,7 @@ def render_frame(text: str, bg_rgb: tuple, text_rgb: tuple, font) -> "Image":
         return img
     draw = ImageDraw.Draw(img)
 
-    lines = wrap_lines(draw, text, font, int(VIDEO_WIDTH * 0.82))
+    lines = wrap_lines(draw, text, font, int(VIDEO_WIDTH * 0.72))
     lines = fix_typography(lines)
 
     line_h = int(font.size * 1.18)
