@@ -8,13 +8,16 @@ import tempfile
 import os
 import json
 import sys
+import re
 from pathlib import Path
 import shutil
 
 app = FastAPI()
 
-VIDEO_WIDTH  = 720
-VIDEO_HEIGHT = 1280
+VIDEO_WIDTH       = 720
+VIDEO_HEIGHT      = 1280
+MAX_SUBTITLE_CHARS = 130
+OPENAI_MODEL      = "gpt-4o"
 
 FONT_DIR = Path("/usr/share/fonts/truetype/montserrat")
 FONT_MAP = {
@@ -270,6 +273,49 @@ def adjust_timestamps(transcript_data: list, intervals: list) -> list:
             "end":   shift(block["end"]),
         })
     return result
+
+
+def split_text_into_subtitle_blocks(text: str, client, max_chars: int = MAX_SUBTITLE_CHARS) -> list[str]:
+    flat_text = " ".join(text.split())
+
+    prompt = f"""You are a subtitle editor. Split the following text into subtitle blocks for a video.
+
+RULES:
+1. Each block must be a complete, logical phrase - never cut mid-thought
+2. Each block must be maximum {max_chars} characters (including spaces)
+3. Prefer splitting at: sentence endings (. ? !), em dashes, or commas
+4. Do NOT change, add, or remove any words - only split
+5. Return ONLY the blocks, one per line, no numbering, no extra text
+
+TEXT:
+{flat_text}"""
+
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    gpt_blocks = [line.strip() for line in raw.splitlines() if line.strip()]
+
+    blocks = []
+    for block in gpt_blocks:
+        parts = re.split(r'(?<=[.?!])["’‘\']?\s+', block)
+        blocks.extend([p.strip() for p in parts if p.strip()])
+
+    return blocks
+
+
+@app.post("/split")
+async def split_text(text: str = Form(...)):
+    from openai import OpenAI
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+    client = OpenAI(api_key=api_key)
+    blocks = split_text_into_subtitle_blocks(text, client)
+    return {"blocks": blocks}
 
 
 def render_frame(text: str, bg_rgb: tuple, text_rgb: tuple, font) -> "Image":
