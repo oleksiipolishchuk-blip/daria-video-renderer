@@ -9,6 +9,7 @@ import os
 import json
 import sys
 import re
+import httpx
 from pathlib import Path
 import shutil
 
@@ -273,6 +274,66 @@ def adjust_timestamps(transcript_data: list, intervals: list) -> list:
             "end":   shift(block["end"]),
         })
     return result
+
+
+def _split_chunks(text: str, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+    chunks, start = [], 0
+    while start < len(text):
+        if start + max_chars >= len(text):
+            chunks.append(text[start:].strip())
+            break
+        sub = text[start:start + max_chars]
+        cut = -1
+        for i in range(len(sub) - 1, max_chars // 2, -1):
+            if sub[i] in '.!?' and i + 1 < len(sub) and sub[i + 1] == ' ':
+                cut = i + 2
+                break
+        if cut < 0:
+            sp = sub.rfind(' ')
+            cut = sp + 1 if sp > 0 else max_chars
+        chunks.append(text[start:start + cut].strip())
+        start += cut
+    return [c for c in chunks if c]
+
+
+def _clean_text(text: str) -> str:
+    clean = " ".join(text.split())
+    for bad, good in [
+        ("â", "'"), ("â", "“"), ("â", "”"),
+        ("â", "—"), ("â", "–"), ("â", "—"),
+    ]:
+        clean = clean.replace(bad, good)
+    return clean
+
+
+@app.post("/tts")
+async def text_to_speech(
+    text: str = Form(...),
+    voice_id: str = Form("cm1VTuOWsFQRdZ5uDzSB"),
+    api_key: str = Form(...),
+    speed: float = Form(1.1),
+):
+    clean = _clean_text(text)
+    chunks = _split_chunks(clean, 1500)
+    parts = []
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for i, chunk in enumerate(chunks):
+            r = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                json={
+                    "text": chunk,
+                    "model_id": "eleven_v3",
+                    "speed": speed,
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "use_speaker_boost": True},
+                },
+            )
+            if r.status_code != 200 or len(r.content) < 100:
+                raise HTTPException(status_code=500, detail=f"ElevenLabs chunk {i+1}: {r.text[:300]}")
+            parts.append(r.content)
+    return Response(content=b"".join(parts), media_type="audio/mpeg")
 
 
 def split_text_into_subtitle_blocks(text: str, client, max_chars: int = MAX_SUBTITLE_CHARS) -> list[str]:
