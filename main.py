@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from typing import Optional
 import base64
 import subprocess
@@ -14,6 +15,13 @@ from pathlib import Path
 import shutil
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 VIDEO_WIDTH       = 720
 VIDEO_HEIGHT      = 1280
@@ -545,6 +553,212 @@ async def render_video(
             "Content-Disposition": 'attachment; filename="video.mp4"',
         },
     )
+
+
+def align_timestamps_python(gpt_blocks: list, words: list) -> list:
+    def norm(w: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', w).lower()
+
+    w_norm = [norm(w['word']) for w in words]
+    n = len(w_norm)
+    word_pos: dict = {}
+    for i, w in enumerate(w_norm):
+        if w:
+            word_pos.setdefault(w, []).append(i)
+
+    result, cursor = [], 0
+    for block in gpt_blocks:
+        b_norm = [norm(w) for w in block.split() if norm(w)]
+        if not b_norm:
+            continue
+        start_idx = None
+        for off in range(min(3, len(b_norm))):
+            if start_idx is not None:
+                break
+            for pos in [p for p in word_pos.get(b_norm[off], []) if p - off >= cursor]:
+                cs = pos - off
+                matches = sum(1 for d, bw in enumerate(b_norm[:4]) if cs + d < n and w_norm[cs + d] == bw)
+                if matches >= (1 if len(b_norm) <= 2 else 2):
+                    start_idx = cs
+                    break
+        if start_idx is None:
+            lb = max(0, cursor - 10)
+            for off in range(min(3, len(b_norm))):
+                if start_idx is not None:
+                    break
+                for pos in sorted([p for p in word_pos.get(b_norm[off], []) if lb <= p - off < cursor], reverse=True):
+                    cs = pos - off
+                    matches = sum(1 for d, bw in enumerate(b_norm[:4]) if cs + d < n and w_norm[cs + d] == bw)
+                    if matches >= (1 if len(b_norm) <= 2 else 2):
+                        start_idx = cs
+                        break
+        if start_idx is None:
+            if result:
+                result[-1]['text'] += ' ' + block
+            continue
+        end_idx = min(start_idx + len(b_norm) - 1, n - 1)
+        fixed = re.sub(r'\b(Releyshio|RelayShow|Relay\s*Show|Rilaysho)\b', 'Relatio', block, flags=re.IGNORECASE)
+        result.append({'text': fixed, 'start': round(words[start_idx]['start'], 3), 'end': round(words[end_idx]['end'], 3)})
+        cursor = end_idx + 1
+    return result
+
+
+FONT_SIZES = {
+    'montserrat': 58, 'gilroy': 56, 'georgia': 54,
+    'ltcarpet': 52, 'inter': 58, 'bodyhand': 50,
+}
+
+
+@app.post("/generate")
+async def generate_video_web(
+    text:       str           = Form(...),
+    voice_id:   str           = Form("cm1VTuOWsFQRdZ5uDzSB"),
+    font:       str           = Form("Montserrat"),
+    bg_color:   str           = Form("#000000"),
+    text_color: str           = Form("#FFFFFF"),
+    music:      Optional[UploadFile] = File(None),
+):
+    el_key  = os.environ.get("ELEVENLABS_API_KEY", "")
+    oai_key = os.environ.get("OPENAI_API_KEY", "")
+    if not el_key:
+        raise HTTPException(500, "ELEVENLABS_API_KEY not set")
+    if not oai_key:
+        raise HTTPException(500, "OPENAI_API_KEY not set")
+
+    font_size_int = FONT_SIZES.get(font.lower(), 58)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+
+        # 1. TTS
+        clean = _clean_text(text)
+        chunks = _split_chunks(clean, 1500)
+        parts = []
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            for i, chunk in enumerate(chunks):
+                r = await client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    headers={"xi-api-key": el_key, "Content-Type": "application/json"},
+                    json={"text": chunk, "model_id": "eleven_v3", "speed": 1.1,
+                          "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "use_speaker_boost": True}},
+                )
+                if r.status_code != 200 or len(r.content) < 100:
+                    raise HTTPException(500, f"TTS error chunk {i+1}: {r.text[:200]}")
+                parts.append(r.content)
+
+        audio_path = tmp_path / "audio.mp3"
+        audio_path.write_bytes(b"".join(parts))
+
+        # 2. Loudnorm
+        norm_path = tmp_path / "audio_norm.mp3"
+        rn = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(audio_path), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+             "-c:a", "libmp3lame", "-q:a", "2", str(norm_path)],
+            capture_output=True, text=True, timeout=120
+        )
+        if rn.returncode == 0:
+            audio_path = norm_path
+
+        # 3. Remove silence + adjust timestamps
+        audio_path, silence_intervals = remove_silence(audio_path, tmp_path)
+
+        # 4. Whisper
+        from openai import OpenAI
+        oai = OpenAI(api_key=oai_key)
+        with open(audio_path, 'rb') as f:
+            wresult = oai.audio.transcriptions.create(
+                model="whisper-1", file=f,
+                response_format="verbose_json",
+                timestamp_granularities=["word"]
+            )
+        whisper_words = [{"word": w.word, "start": w.start, "end": w.end} for w in (wresult.words or [])]
+
+        # 5. GPT subtitle split
+        gpt_blocks = split_text_into_subtitle_blocks(wresult.text, oai)
+
+        # 6. Align + adjust timestamps
+        transcript_data = align_timestamps_python(gpt_blocks, whisper_words)
+        transcript_data = adjust_timestamps(transcript_data, silence_intervals)
+        transcript_data = split_long_blocks(transcript_data, font)
+
+        # 7. Render
+        bg_rgb   = hex_to_rgb(bg_color   if bg_color.startswith("#")   else f"#{bg_color}")
+        text_rgb = hex_to_rgb(text_color if text_color.startswith("#") else f"#{text_color}")
+        all_texts   = [b["text"] for b in transcript_data]
+        global_size = fit_font_size(all_texts, font, font_size_int)
+        pil_font    = load_font(font, global_size)
+
+        music_data = await music.read() if music else None
+        frames_dir = tmp_path / "frames"
+        no_music   = tmp_path / "no_music.mp4"
+        output     = tmp_path / "output.mp4"
+        frames_dir.mkdir()
+
+        music_path = None
+        if music_data:
+            music_path = tmp_path / "music.mp3"
+            music_path.write_bytes(music_data)
+
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+                capture_output=True, text=True)
+            audio_duration = float(probe.stdout.strip())
+        except Exception:
+            audio_duration = transcript_data[-1]["end"] if transcript_data else 0
+
+        frame_paths = {}
+        for idx, block in enumerate(transcript_data):
+            fp = frames_dir / f"frame_{idx:04d}.png"
+            render_frame(block["text"], bg_rgb, text_rgb, pil_font).save(str(fp), "PNG")
+            frame_paths[idx] = fp
+
+        concat_lines = []
+        for idx, block in enumerate(transcript_data):
+            dur = round((transcript_data[idx+1]["start"] if idx+1 < len(transcript_data) else audio_duration) - block["start"], 3)
+            if dur <= 0:
+                continue
+            concat_lines += [f"file '{frame_paths[idx]}'", f"duration {dur}"]
+        if concat_lines:
+            concat_lines.append(concat_lines[-2])
+
+        concat_file = tmp_path / "concat.txt"
+        concat_file.write_text("\n".join(concat_lines))
+
+        cmd1 = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                "-i", str(audio_path), "-vsync", "cfr", "-r", "30",
+                "-c:v", "libx264", "-preset", "fast", "-profile:v", "high", "-level", "4.0",
+                "-crf", "23", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p", "-vf", "setsar=1:1", "-movflags", "+faststart",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-shortest", str(no_music)]
+        r1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=600)
+        if r1.returncode != 0:
+            raise HTTPException(500, f"FFmpeg: {r1.stderr[-1000:]}")
+
+        if music_path:
+            cmd2 = ["ffmpeg", "-y", "-i", str(no_music), "-stream_loop", "-1", "-i", str(music_path),
+                    "-filter_complex", "[1:a]volume=0.1[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                    "-map", "0:v", "-map", "[aout]", "-c:v", "copy",
+                    "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest", str(output)]
+            r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
+            if r2.returncode != 0:
+                shutil.copy(str(no_music), str(output))
+        else:
+            shutil.copy(str(no_music), str(output))
+
+        video_bytes = output.read_bytes()
+
+    return Response(
+        content=video_bytes,
+        media_type="video/mp4",
+        headers={"Content-Disposition": 'attachment; filename="video.mp4"'},
+    )
+
+
+@app.get("/", response_class=HTMLResponse)
+def web_ui():
+    return HTMLResponse(content=open(Path(__file__).parent / "index.html").read() if (Path(__file__).parent / "index.html").exists() else "<h1>Not found</h1>")
 
 
 @app.get("/health")
